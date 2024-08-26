@@ -13,7 +13,7 @@ thread_local! {
     static ACITVE_CUDA_DEVICE: RefCell<i32> = RefCell::new(-1);
 }
 
-const HUGE_BUFFER_SIZE: usize = 1 << 28;
+const HUGE_BUFFER_SIZE: usize = 1 << 30;
 
 lazy_static! {
     pub static ref CUDA_BUFFER_CACHE: Mutex<HashMap::<(i32, usize), Vec<usize>>> =
