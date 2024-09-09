@@ -25,3 +25,6 @@ cc = "1.0.83"
 default = ["halo2_proofs/cuda"]
 profile = ["ark-std/print-trace", "halo2_proofs/profile"]
 hugetlb = []
+
+[patch."https://github.com/DelphinusLab/zkWasm-prover.git"]
+zkwasm-prover = { path = "../zkWasm-prover-k23" }
