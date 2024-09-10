@@ -76,7 +76,6 @@ pub(crate) mod gwc {
         g_buf: &CudaDeviceBufRaw,
         queries: I,
         size: usize,
-        s_buf: [&CudaDeviceBufRaw; 2],
         eval_map: BTreeMap<(usize, C::Scalar), C::Scalar>,
         transcript: &mut T,
     ) -> DeviceResult<()>
@@ -161,7 +160,7 @@ pub(crate) mod gwc {
 
         let timer = start_timer!(|| "msm");
 
-        let commitments = batch_msm(&g_buf, s_buf, ws.iter().map(|x| &x[..]).collect(), size)?;
+        let commitments = batch_msm(&device, &g_buf, ws.iter().map(|x| &x[..]).collect(), size)?;
         for commitment in commitments {
             transcript.write_point(commitment).unwrap();
         }
@@ -285,7 +284,6 @@ pub mod shplonk {
         g_buf: &CudaDeviceBufRaw,
         queries: I,
         size: usize,
-        s_buf: [&CudaDeviceBufRaw; 2],
         eval_map: BTreeMap<(usize, C::Scalar), C::Scalar>,
         mut poly_cache: BTreeMap<usize, CudaDeviceBufRaw>,
         transcript: &mut T,
@@ -553,7 +551,7 @@ pub mod shplonk {
             lx[0] = tmp;
         }
 
-        let commitments = batch_msm(&g_buf, s_buf, vec![&lx[..]], size)?;
+        let commitments = batch_msm(&device, &g_buf, vec![&lx[..]], size)?;
         for commitment in commitments {
             transcript.write_point(commitment).unwrap();
         }

@@ -278,9 +278,9 @@ pub fn batch_msm_v2<C: CurveAffine>(
     Ok(res_vec)
 }
 
-pub(crate) fn batch_msm<const MSM_STREAMS_NR: usize, C: CurveAffine>(
+pub(crate) fn batch_msm<C: CurveAffine>(
+    device: &CudaDevice,
     p_buf: &CudaDeviceBufRaw,
-    s_buf: [&CudaDeviceBufRaw; MSM_STREAMS_NR],
     values: Vec<&[C::Scalar]>,
     len: usize,
 ) -> Result<Vec<C>, Error> {
@@ -288,6 +288,13 @@ pub(crate) fn batch_msm<const MSM_STREAMS_NR: usize, C: CurveAffine>(
         cudaDeviceSynchronize();
     }
 
+    const MSM_STREAMS_NR: usize = 2;
+
+    let s_buf = [0; MSM_STREAMS_NR].map(|_| {
+        device
+            .alloc_device_buffer_non_zeroed::<C::Scalar>(len)
+            .unwrap()
+    });
     let streams = [0; MSM_STREAMS_NR].map(|_| CudaStream::create().unwrap());
     let mut msm_results_buf = values
         .iter()
@@ -446,8 +453,6 @@ pub(crate) fn batch_msm_and_conditional_intt<C: CurveAffine>(
 pub(crate) fn batch_msm_and_intt<C: CurveAffine>(
     device: &CudaDevice,
     p_buf: &CudaDeviceBufRaw,
-    s_buf: [&mut CudaDeviceBufRaw; 2],
-    t_buf: [&mut CudaDeviceBufRaw; 2],
     pq_buf: &CudaDeviceBufRaw,
     omegas_buf: &CudaDeviceBufRaw,
     divisor: &CudaDeviceBufRaw,
@@ -459,6 +464,16 @@ pub(crate) fn batch_msm_and_intt<C: CurveAffine>(
     }
 
     let len = 1 << len_log;
+
+    let mut s_buf = [
+        device.alloc_device_buffer_non_zeroed::<C::Scalar>(len)?,
+        device.alloc_device_buffer_non_zeroed::<C::Scalar>(len)?,
+    ];
+
+    let mut t_buf = [
+        device.alloc_device_buffer_non_zeroed::<C::Scalar>(len)?,
+        device.alloc_device_buffer_non_zeroed::<C::Scalar>(len)?,
+    ];
 
     const MSM_STREAMS_NR: usize = 2;
     let streams = [0; MSM_STREAMS_NR].map(|_| CudaStream::create().unwrap());
@@ -500,8 +515,8 @@ pub(crate) fn batch_msm_and_intt<C: CurveAffine>(
         let stream = unsafe { *(stream as *const _ as *const *mut _) };
         intt_raw_async(
             device,
-            s_buf[idx % MSM_STREAMS_NR],
-            t_buf[idx % MSM_STREAMS_NR],
+            &mut s_buf[idx % MSM_STREAMS_NR],
+            &mut t_buf[idx % MSM_STREAMS_NR],
             pq_buf,
             omegas_buf,
             divisor,
