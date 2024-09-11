@@ -28,7 +28,6 @@ pub(crate) fn extended_prepare(
     stream: Option<cudaStream_t>,
 ) -> Result<(), Error> {
     unsafe {
-        device.acitve_ctx()?;
         let err = bn254_c::extended_prepare(
             s.ptr(),
             coset_powers.ptr(),

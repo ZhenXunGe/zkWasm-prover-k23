@@ -1,5 +1,6 @@
 use core::cell::RefCell;
 use core::mem;
+use cuda_runtime_sys::cudaMemset;
 use cuda_runtime_sys::{cudaError, cudaStream_t, CUstream_st};
 use std::collections::HashMap;
 use std::mem::size_of;
@@ -105,6 +106,12 @@ impl Drop for CudaDeviceBufRaw {
 impl DeviceBuf for CudaDeviceBufRaw {}
 
 impl CudaDevice {
+    pub fn memset<T>(&self, dst: &CudaDeviceBufRaw, value: i32, len: usize) {
+        unsafe {
+            cudaMemset(dst.ptr(), value, len * core::mem::size_of::<T>());
+        }
+    }
+
     pub fn copy_from_host_to_device_async<T>(
         &self,
         dst: &CudaDeviceBufRaw,

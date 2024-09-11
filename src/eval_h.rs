@@ -880,6 +880,36 @@ fn do_extended_ntt_v2_async<F: FieldExt>(
     Ok((buf, tmp, stream))
 }
 
+fn copy_and_extended_ntt_async<F: FieldExt>(
+    device: &CudaDevice,
+    ctx: &mut EvalHContext<F>,
+    data: &[F],
+    last: Option<(CudaStreamWrapper, CudaDeviceBufRaw)>,
+) -> DeviceResult<(CudaDeviceBufRaw, (CudaStreamWrapper, CudaDeviceBufRaw))> {
+    let mut buf = ctx.alloc(device)?;
+    let (sw, stream) = CudaStreamWrapper::new_with_inner();
+    device.copy_from_host_to_device_async::<F>(&buf, data, stream)?;
+    do_extended_prepare(device, ctx, &mut buf, Some(stream))?;
+    let tmp = do_extended_ntt_pure_async(device, ctx, &mut buf, Some(stream))?;
+
+    if let Some((last_stream, last_tmp)) = last {
+        last_stream.sync();
+        ctx.extended_allocator.push(last_tmp);
+    }
+
+    Ok((buf, (sw, tmp)))
+}
+
+fn wait_ntt_finish<F: FieldExt>(
+    ctx: &mut EvalHContext<F>,
+    last: Option<(CudaStreamWrapper, CudaDeviceBufRaw)>,
+) {
+    if let Some((last_stream, last_tmp)) = last {
+        last_stream.sync();
+        ctx.extended_allocator.push(last_tmp);
+    }
+}
+
 fn do_extended_ntt_v3_async<F: FieldExt>(
     device: &CudaDevice,
     ctx: &mut EvalHContext<F>,
@@ -1094,9 +1124,7 @@ fn evaluate_prove_expr_with_async_ntt<F: FieldExt>(
     ctx: &mut EvalHContext<F>,
 ) -> DeviceResult<CudaDeviceBufRaw> {
     let res = ctx.alloc(device)?;
-    unsafe {
-        cudaMemset(res.ptr(), 0, ctx.extended_size * core::mem::size_of::<F>());
-    }
+    device.memset::<F>(&res, 0, ctx.extended_size);
 
     let mut last_bufs = BTreeMap::new();
     for expr in exprs.iter() {
@@ -1107,80 +1135,82 @@ fn evaluate_prove_expr_with_async_ntt<F: FieldExt>(
         }
         let coeffs_buf = device.alloc_device_buffer_from_slice(&coeffs[..])?;
 
-        unsafe {
-            let mut group = vec![];
-            let mut rots = vec![];
+        let mut group = vec![];
+        let mut rots = vec![];
 
-            for (units, _) in expr.iter() {
-                for (u, _) in units {
-                    let id = u.get_group();
-                    if !bufs.contains_key(&id) && last_bufs.contains_key(&id) {
-                        let buf = last_bufs.remove(&id).unwrap();
-                        bufs.insert(id, buf);
-                    }
+        for (units, _) in expr.iter() {
+            for (u, _) in units {
+                let id = u.get_group();
+                if last_bufs.contains_key(&id) {
+                    let buf = last_bufs.remove(&id).unwrap();
+                    bufs.insert(id, buf);
                 }
             }
+        }
 
-            for (_, buf) in last_bufs {
-                ctx.extended_allocator.push(buf)
-            }
+        for (_, buf) in last_bufs {
+            ctx.extended_allocator.push(buf)
+        }
 
-            let mut last_tmp = None;
-            let mut last_stream = None;
-            for (i, (units, _)) in expr.iter().enumerate() {
-                group.push(
-                    coeffs_buf
-                        .ptr()
-                        .offset((i * core::mem::size_of::<F>()) as isize),
-                );
+        let mut last_tmp = None;
+        let mut last_stream = None;
+        for (i, (units, _)) in expr.iter().enumerate() {
+            group.push(unsafe {
+                coeffs_buf
+                    .ptr()
+                    .offset((i * core::mem::size_of::<F>()) as isize)
+            });
 
-                for (u, exp) in units {
-                    let id = u.get_group();
-                    let (src, rot) = match u {
-                        ProveExpressionUnit::Fixed {
-                            column_index,
-                            rotation,
-                        } => (&fixed[*column_index], rotation),
-                        ProveExpressionUnit::Advice {
-                            column_index,
-                            rotation,
-                        } => (&advice[*column_index], rotation),
-                        ProveExpressionUnit::Instance {
-                            column_index,
-                            rotation,
-                        } => (&instance[*column_index], rotation),
-                    };
-                    if !bufs.contains_key(&id) {
-                        let (buf, tmp, stream) = do_extended_ntt_v2_async(device, ctx, src)?;
-                        if let Some(last_stream) = last_stream {
+            for (u, exp) in units {
+                let id = u.get_group();
+                let (src, rot) = match u {
+                    ProveExpressionUnit::Fixed {
+                        column_index,
+                        rotation,
+                    } => (&fixed[*column_index], rotation),
+                    ProveExpressionUnit::Advice {
+                        column_index,
+                        rotation,
+                    } => (&advice[*column_index], rotation),
+                    ProveExpressionUnit::Instance {
+                        column_index,
+                        rotation,
+                    } => (&instance[*column_index], rotation),
+                };
+                if !bufs.contains_key(&id) {
+                    let (buf, tmp, stream) = do_extended_ntt_v2_async(device, ctx, src)?;
+                    if let Some(last_stream) = last_stream {
+                        unsafe {
                             cuda_runtime_sys::cudaStreamSynchronize(last_stream);
                             cuda_runtime_sys::cudaStreamDestroy(last_stream);
-                            ctx.extended_allocator.push(last_tmp.unwrap());
-                            last_tmp = Some(tmp);
-                        } else {
-                            last_tmp = Some(tmp);
                         }
-                        last_stream = Some(stream);
-                        bufs.insert(id, buf);
+                        ctx.extended_allocator.push(last_tmp.unwrap());
                     }
-                    for _ in 0..*exp {
-                        group.push(bufs.get(&id).unwrap().ptr());
-                        rots.push(rot.0 << (ctx.extended_k - ctx.k));
-                    }
+                    last_tmp = Some(tmp);
+                    last_stream = Some(stream);
+                    bufs.insert(id, buf);
                 }
-
-                group.push(0usize as _);
+                for _ in 0..*exp {
+                    group.push(bufs.get(&id).unwrap().ptr());
+                    rots.push(rot.0 << (ctx.extended_k - ctx.k));
+                }
             }
 
-            if let Some(last_stream) = last_stream {
+            group.push(0usize as _);
+        }
+
+        if let Some(last_stream) = last_stream {
+            unsafe {
                 cuda_runtime_sys::cudaStreamSynchronize(last_stream);
                 cuda_runtime_sys::cudaStreamDestroy(last_stream);
-                ctx.extended_allocator.push(last_tmp.unwrap());
             }
+            ctx.extended_allocator.push(last_tmp.unwrap());
+        }
 
-            let group_buf = device.alloc_device_buffer_from_slice(&group[..])?;
-            let rots_buf = device.alloc_device_buffer_from_slice(&rots[..])?;
+        let group_buf = device.alloc_device_buffer_from_slice(&group[..])?;
+        let rots_buf = device.alloc_device_buffer_from_slice(&rots[..])?;
 
+        unsafe {
             let err = field_op_batch_mul_sum(
                 res.ptr(),
                 group_buf.ptr(),
@@ -1191,10 +1221,12 @@ fn evaluate_prove_expr_with_async_ntt<F: FieldExt>(
             );
 
             to_result((), err, "fail to run field_op_batch_mul_sum")?;
-
-            last_bufs = bufs;
         }
+
+        last_bufs = bufs;
     }
+
+    device.synchronize()?;
 
     Ok(res)
 }
